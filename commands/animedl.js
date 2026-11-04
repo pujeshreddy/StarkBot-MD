@@ -817,19 +817,13 @@ async function executeDownloadJob(job) {
             }
         }
 
-        // Strategy 2: Document upload up to 2GB
-        // NOTE: For files > 95MB, use mimetype: 'application/octet-stream' with .mp4 filename.
-        // WhatsApp MMS server caps video/mp4 at 100MB on its upload endpoint.
-        // Setting application/octet-stream unlocks WhatsApp's full 2GB document limit,
-        // and WhatsApp clients / phones automatically associate .mp4 for video playback!
+        // Strategy 2: Document upload up to 2GB with video/mp4 MIME type
+        // Always sends as 'video/mp4' so WhatsApp displays the native "MP4" badge and plays in-app
         if (!sentSuccessfully) {
-            const isLargeDoc = sendStats.size > 95 * 1024 * 1024;
-            const docMimetype = isLargeDoc ? 'application/octet-stream' : 'video/mp4';
-
             try {
                 await sock.sendMessage(chatId, {
                     document: { url: sendFilePath },
-                    mimetype: docMimetype,
+                    mimetype: 'video/mp4',
                     fileName: finalFileName,
                     caption,
                     contextInfo: channelInfo
@@ -841,16 +835,13 @@ async function executeDownloadJob(job) {
             }
         }
 
-        // Strategy 3: Stream fallback (if Baileys url resolver was interrupted)
+        // Strategy 3: Stream fallback via fs.createReadStream with video/mp4
         if (!sentSuccessfully) {
-            const isLargeDoc = sendStats.size > 95 * 1024 * 1024;
-            const docMimetype = isLargeDoc ? 'application/octet-stream' : 'video/mp4';
-
             try {
                 console.log(`[anime-worker #${workerId}] Retrying document via fs.createReadStream...`);
                 await sock.sendMessage(chatId, {
                     document: fs.createReadStream(sendFilePath),
-                    mimetype: docMimetype,
+                    mimetype: 'video/mp4',
                     fileName: finalFileName,
                     caption,
                     contextInfo: channelInfo
@@ -862,14 +853,14 @@ async function executeDownloadJob(job) {
             }
         }
 
-        // Strategy 4: If <= 90MB and still failed, buffer retry
+        // Strategy 4: If <= 90MB and still failed, buffer retry with video/mp4
         if (!sentSuccessfully && sendStats.size <= 90 * 1024 * 1024) {
             try {
                 console.log(`[anime-worker #${workerId}] Retrying upload via Buffer...`);
                 const fileBuffer = fs.readFileSync(sendFilePath);
                 await sock.sendMessage(chatId, {
                     document: fileBuffer,
-                    mimetype: 'application/octet-stream',
+                    mimetype: 'video/mp4',
                     fileName: finalFileName,
                     caption,
                     contextInfo: channelInfo
@@ -881,7 +872,25 @@ async function executeDownloadJob(job) {
             }
         }
 
-        // Strategy 5: If all uploads failed, provide direct high-speed download link
+        // Strategy 5: Fallback with application/octet-stream only if WhatsApp rejected video/mp4
+        if (!sentSuccessfully) {
+            try {
+                console.log(`[anime-worker #${workerId}] Retrying document with octet-stream fallback...`);
+                await sock.sendMessage(chatId, {
+                    document: { url: sendFilePath },
+                    mimetype: 'application/octet-stream',
+                    fileName: finalFileName,
+                    caption,
+                    contextInfo: channelInfo
+                }, { quoted: message, mediaUploadTimeoutMs: UPLOAD_TIMEOUT_MS });
+                sentSuccessfully = true;
+            } catch (fbErr) {
+                console.log(`[anime-worker #${workerId}] Octet-stream fallback upload failed:`, fbErr.message);
+                lastUploadError = fbErr;
+            }
+        }
+
+        // Strategy 6: If all uploads failed, provide direct high-speed download link
         if (!sentSuccessfully) {
             await sock.sendMessage(chatId, {
                 text: `⚠️ *[Worker #${workerId}] WhatsApp upload failed:* ${lastUploadError?.message || 'Media upload error'}\n\n🔗 *Direct Download Link:*\n${streamUrl}\n\n📺 ${animeName} — ${episode.title} [${quality}]\n📊 File Size: ${sendSizeMB}MB\n\n💡 _Open the link in your browser to watch or download._`,
