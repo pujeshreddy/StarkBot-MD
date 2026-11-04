@@ -1,0 +1,26 @@
+require('dotenv').config();
+
+const settings = {
+  packname: 'Stark Bot MD',
+  author: 'pujeshreddy',
+  botName: "Stark Bot MD",
+  botOwner: 'pujeshreddy', // Your name
+  ownerNumber: '919603298365', //Set your number here without + symbol, just add country code & number without any space
+  giphyApiKey: 'qnl7ssQChTdPjsKta2Ax2LMaGXz303tq',
+  commandMode: "public",
+  maxStoreMessages: 20, 
+  storeWriteInterval: 10000,
+  maxRamMB: 1024,
+  description: "This is a bot for managing group commands and automating tasks.",
+  version: "3.0.8",
+  updateZipUrl: "https://github.com/pujeshreddy/StarkBot-MD/archive/refs/heads/main.zip",
+  // Media / Knight API (song, video, cards, etc.)
+  knightApiUrl: process.env.KNIGHT_API_URL || 'https://knightbotapi.stream',
+  knightApiKey: process.env.KNIGHT_API_KEY || 'knight',
+  mediaApiUrl: process.env.MEDIA_API_URL || 'https://knightbotapi.stream',
+  mediaApiKey: process.env.MEDIA_API_KEY || 'knight',
+  princeApiUrl: process.env.PRINCE_API_URL || 'https://api.princetechn.com',
+  princeApiKey: process.env.PRINCE_API_KEY || 'prince',
+};
+
+module.exports = settings;
