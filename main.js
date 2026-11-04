@@ -140,6 +140,7 @@ const sudoCommand = require('./commands/sudo');
 const { miscCommand, handleHeart } = require('./commands/misc');
 const { animeCommand } = require('./commands/anime');
 const { animeDownloadCommand } = require('./commands/animedl');
+const { movieDownloadCommand } = require('./commands/moviedl');
 const { piesCommand, piesAlias } = require('./commands/pies');
 const stickercropCommand = require('./commands/stickercrop');
 const updateCommand = require('./commands/update');
@@ -1113,6 +1114,14 @@ async function handleMessages(sock, messageUpdate, printLog) {
                 {
                     const animeArgs = rawText.trim().split(/\s+/).slice(1);
                     await animeDownloadCommand(sock, chatId, message, animeArgs);
+                    commandExecuted = true;
+                }
+                break;
+            case userMessage.startsWith('.movie'):
+            case userMessage.startsWith('.movies'):
+                {
+                    const movieArgs = rawText.trim().split(/\s+/).slice(1);
+                    await movieDownloadCommand(sock, chatId, message, movieArgs);
                     commandExecuted = true;
                 }
                 break;

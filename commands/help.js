@@ -235,6 +235,23 @@ async function helpCommand(sock, chatId, message) {
 ║ ➤ .anime page <number>
 ╚═══════════════════╝
 
+╔═══════════════════╗
+🎬 *MOVIE & SERIES ZONE*:
+║ ➤ .movie
+║ ➤ .movie latest
+║ ➤ .movie netflix
+║ ➤ .movie 4k
+║ ➤ .movie anime
+║ ➤ .movie genre <name>
+║ ➤ .movie search <query>
+║ ➤ .movie info <number>
+║ ➤ .movie episodes <number>
+║ ➤ .movie dl <number>
+║ ➤ .movie page <number>
+║ ➤ .movie workers
+║ ➤ .movie cancel
+╚═══════════════════╝
+
 📢 *Join our channel for updates:*
 https://whatsapp.com/channel/0029VbCQiN69cDDZrNlOc63F`;
 

@@ -47,9 +47,20 @@
 - **Smart AniList Metadata**: Auto-resolves high-resolution official posters via AniList & Kitsu GraphQL, bypassing Cloudflare blocks.
 - **Multi-Quality Streaming & Remuxing**: Choose 360p, 480p, 720p, or 1080p. Automatically remuxes MKV streams into WhatsApp-compatible MP4 with `+faststart` metadata using FFmpeg.
 - **Large File Support (Up to 2GB)**: Sends large episodes as WhatsApp documents with extended timeouts, chunked streaming, and buffer recovery.
+- **Worker Pool Queue**: Multi-worker asynchronous queue (`.movie workers`, `.anime workers`) allowing multiple simultaneous user downloads.
 - **Search & Quick Download**: `.anime search <title>`, `.anime info <num>`, `.anime episodes <num>`, and `.anime dl <num>`.
 
-### 👮‍♂️ 2. Group Management & Security
+### 🎬 2. Powerful Movie & Web Series Zone (`.movie`)
+- **Interactive Catalogs**: Browse Latest, Netflix, 4K Ultra-HD, and Anime titles powered by MoviesDrive API.
+- **Genre Filtering**: Browse Action, Crime, Comedy, Drama, Horror, Family, Sci-Fi, Thriller, Romance, and Fight.
+- **Full TV Series & Movie Support**: Seamlessly browse full movie qualities or explore multi-season series episode lists.
+- **TMDB & Metahub Metadata**: High-resolution official posters, cast, synopsis, genres, and IMDb ratings.
+- **Multi-Mirror Streams**: Automatic fallback between Cloudflare R2 / Worker, Google Drive CDN, and Pixeldrain.
+- **Instant Faststart MP4**: Fast remuxing via FFmpeg to native MP4 with moov atom for immediate in-app video playback.
+- **Up to 2GB Document Delivery**: High-speed multi-worker downloads delivered with native MP4 badges in WhatsApp.
+- **Simple Flow**: `.movie search <name>`, `.movie info <num>`, `.movie episodes <num>` (for series), and `.movie dl <num>`.
+
+### 👮‍♂️ 3. Group Management & Security
 - **Anti-Link Shield**: Automatically detects and deletes invite links (`.antilink`).
 - **Anti-Badword**: Filters vulgar words and warns/removes offenders (`.antibadword`).
 - **Anti-Bot Detection**: Real-time detection and ejection of rogue automated bots (`.antibot`).

@@ -71,8 +71,10 @@ setInterval(() => {
         global.gc()
     }
     if (used > MAX_RAM_MB) {
-        if (global.activeAnimeWorkers && global.activeAnimeWorkers > 0) {
-            console.log(`⚠️ RAM high (${used.toFixed(0)}MB) during active anime download worker - running GC`);
+        const hasActiveWorkers = (global.activeAnimeWorkers && global.activeAnimeWorkers > 0) ||
+                                 (global.activeMovieWorkers && global.activeMovieWorkers > 0);
+        if (hasActiveWorkers) {
+            console.log(`⚠️ RAM high (${used.toFixed(0)}MB) during active download worker - running GC`);
             if (global.gc) global.gc();
             return;
         }
