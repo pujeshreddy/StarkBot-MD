@@ -1,0 +1,17 @@
+{
+  "$schema": "https://schema.railpack.com",
+  "provider": "node",
+  "packages": {
+    "node": "20"
+  },
+  "buildAptPackages": [
+    "...",
+    "build-essential"
+  ],
+  "deploy": {
+    "aptPackages": [
+      "...",
+      "ffmpeg"
+    ]
+  }
+}
