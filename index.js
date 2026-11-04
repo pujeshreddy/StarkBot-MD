@@ -71,6 +71,11 @@ setInterval(() => {
         global.gc()
     }
     if (used > MAX_RAM_MB) {
+        if (global.activeAnimeWorkers && global.activeAnimeWorkers > 0) {
+            console.log(`⚠️ RAM high (${used.toFixed(0)}MB) during active anime download worker - running GC`);
+            if (global.gc) global.gc();
+            return;
+        }
         console.log(`⚠️ RAM too high (>${MAX_RAM_MB}MB), restarting bot...`)
         process.exit(1) // Panel will auto-restart
     }
@@ -123,6 +128,7 @@ async function startXeonBotInc() {
             defaultQueryTimeoutMs: 60000,
             connectTimeoutMs: 60000,
             keepAliveIntervalMs: 10000,
+            mediaUploadTimeoutMs: 900000,
         })
 
         // Save credentials when they update

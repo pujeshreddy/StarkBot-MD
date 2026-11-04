@@ -39,7 +39,8 @@ const { spawn } = require('child_process');
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 const API_BASE = 'https://moviebeast.up.railway.app/api/gokuHD';
-const TIMEOUT = 30000;
+const TIMEOUT = 60000; // 60s for catalog and metadata
+const STREAM_TIMEOUT = 75000; // 75s for stream scraper extraction
 const HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     'Accept': '*/*'
@@ -48,8 +49,8 @@ const HEADERS = {
 // Max WhatsApp document limit (WhatsApp allows up to 2GB)
 const MAX_WHATSAPP_DOC_SIZE = 2000 * 1024 * 1024; // 2 GB
 
-// Upload timeout in milliseconds (10 minutes for large video uploads)
-const UPLOAD_TIMEOUT_MS = 600000;
+// Upload timeout in milliseconds (15 minutes for large video uploads)
+const UPLOAD_TIMEOUT_MS = 900000;
 
 // Temp directory for anime files
 const TEMP_DIR = path.join(process.cwd(), 'temp');
@@ -93,7 +94,7 @@ function clearSession(chatId) {
 }
 
 // Clean expired sessions periodically
-setInterval(() => {
+const sessionCleanerTimer = setInterval(() => {
     const now = Date.now();
     for (const [chatId, session] of sessions) {
         if (now - session.lastAccess > SESSION_TTL) {
@@ -101,6 +102,7 @@ setInterval(() => {
         }
     }
 }, 60000);
+if (sessionCleanerTimer.unref) sessionCleanerTimer.unref();
 
 // ─── Cleanup Helper ──────────────────────────────────────────────────────────
 
@@ -315,16 +317,34 @@ async function fetchEpisodes(url) {
     }
 }
 
-async function fetchStream(link, type = 'movie', download = false) {
+async function fetchStream(link, type = 'movie', download = false, attempt = 1) {
     try {
+        console.log(`[anime] Fetching stream (attempt ${attempt}, download=${download}):`, link);
         const { data } = await axios.get(`${API_BASE}/stream`, {
             params: { link, type, download },
             headers: HEADERS,
-            timeout: TIMEOUT
+            timeout: STREAM_TIMEOUT
         });
+        if (data && Array.isArray(data.streams) && data.streams.length > 0) {
+            return data;
+        }
+        // If download=false returned empty streams, immediately try download=true
+        if (!download) {
+            console.log('[anime] download=false returned no streams, trying download=true...');
+            return await fetchStream(link, type, true, attempt + 1);
+        }
         return data;
     } catch (err) {
-        console.error('[anime] Stream fetch error:', err.message);
+        console.error(`[anime] Stream fetch error (attempt ${attempt}):`, err.message);
+        // If first attempt timed out or failed with download=false, retry with download=true
+        if (attempt === 1 && !download) {
+            console.log('[anime] Retrying stream fetch with download=true...');
+            return await fetchStream(link, type, true, 2);
+        }
+        if (attempt < 3) {
+            await new Promise(r => setTimeout(r, 2000));
+            return await fetchStream(link, type, !download, attempt + 1);
+        }
         return null;
     }
 }
@@ -345,7 +365,7 @@ async function downloadVideoToFile(url, fileName) {
             ...HEADERS,
             'Referer': 'https://gokuhd.cc/'
         },
-        timeout: 600000 // 10 minutes max
+        timeout: 900000 // 15 minutes max
     });
 
     const writer = fs.createWriteStream(filePath);
@@ -437,13 +457,19 @@ function buildMainMenu() {
 ┃ ➤ \`.anime search <name>\`
 ┃   _Example: .anime search bleach_
 
-📌 *Next steps:*
+📌 *Download Flow:*
 ┃ ➤ \`.anime info <number>\`
 ┃   _Details & official poster_
 ┃ ➤ \`.anime episodes <number>\`
 ┃   _Select season/quality_
 ┃ ➤ \`.anime dl <number>\`
-┃   _Download episode directly to chat (up to 2GB!)_
+┃   _High-speed multi-worker download (up to 2GB!)_
+
+⚙️ *Workers & Queue:*
+┃ ➤ \`.anime workers\`
+┃   _Check active download workers & queue_
+┃ ➤ \`.anime cancel\`
+┃   _Cancel your pending download_
 
 ⚡ *Sessions auto-save your progress for 15 minutes.*`;
 }
@@ -507,6 +533,378 @@ function buildEpisodeList(episodes, title, quality) {
     msg += `_Example: .anime dl 1 (Sends episode into chat!)_\n`;
 
     return msg;
+}
+
+// ─── Worker Pool & Queue Manager ────────────────────────────────────────────
+
+// Initialize global counter for active anime workers
+global.activeAnimeWorkers = 0;
+
+class AnimeDownloadQueue {
+    constructor(maxConcurrent = 2) {
+        this.maxConcurrent = maxConcurrent;
+        this.queue = [];
+        this.activeJobs = new Map(); // jobId -> job
+        this.userJobMap = new Map(); // chatId -> jobId
+        this.nextWorkerId = 1;
+    }
+
+    get activeCount() {
+        return this.activeJobs.size;
+    }
+
+    get queueCount() {
+        return this.queue.length;
+    }
+
+    hasActiveOrQueuedJob(chatId) {
+        return this.userJobMap.has(chatId);
+    }
+
+    getJobByChat(chatId) {
+        const jobId = this.userJobMap.get(chatId);
+        if (!jobId) return null;
+        if (this.activeJobs.has(jobId)) {
+            return { job: this.activeJobs.get(jobId), isQueued: false, position: 0 };
+        }
+        const qIndex = this.queue.findIndex(j => j.id === jobId);
+        if (qIndex !== -1) {
+            return { job: this.queue[qIndex], isQueued: true, position: qIndex + 1 };
+        }
+        return null;
+    }
+
+    cancelJob(chatId) {
+        const existing = this.getJobByChat(chatId);
+        if (!existing) return null;
+
+        const { job, isQueued } = existing;
+        if (isQueued) {
+            this.queue = this.queue.filter(j => j.id !== job.id);
+            this.userJobMap.delete(chatId);
+            job.status = 'cancelled';
+            return { job, cancelled: true, wasQueued: true };
+        } else {
+            job.status = 'cancelled';
+            if (job.abortController) {
+                try { job.abortController.abort(); } catch {}
+            }
+            if (job.cleanFilePaths && Array.isArray(job.cleanFilePaths)) {
+                for (const p of job.cleanFilePaths) {
+                    cleanupFile(p);
+                }
+            }
+            this.activeJobs.delete(job.id);
+            this.userJobMap.delete(chatId);
+            global.activeAnimeWorkers = this.activeJobs.size;
+            this.processNext();
+            return { job, cancelled: true, wasQueued: false };
+        }
+    }
+
+    enqueue(jobData) {
+        const job = {
+            id: `anime_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+            ...jobData,
+            status: 'queued',
+            createdAt: Date.now(),
+            workerId: null,
+            cleanFilePaths: [],
+            abortController: new AbortController()
+        };
+
+        this.userJobMap.set(job.chatId, job.id);
+
+        if (this.activeJobs.size < this.maxConcurrent) {
+            this.startJob(job);
+            return { queued: false, job, queuePosition: 0 };
+        } else {
+            this.queue.push(job);
+            const position = this.queue.length;
+            return { queued: true, job, queuePosition: position };
+        }
+    }
+
+    async startJob(job) {
+        const workerId = this.nextWorkerId++;
+        job.workerId = workerId;
+        job.status = 'active';
+        this.activeJobs.set(job.id, job);
+        global.activeAnimeWorkers = this.activeJobs.size;
+
+        try {
+            await executeDownloadJob(job);
+        } catch (err) {
+            console.error(`[anime-worker #${workerId}] Unexpected error:`, err);
+        } finally {
+            this.activeJobs.delete(job.id);
+            this.userJobMap.delete(job.chatId);
+            global.activeAnimeWorkers = this.activeJobs.size;
+            if (global.gc) global.gc();
+            this.processNext();
+        }
+    }
+
+    processNext() {
+        if (this.queue.length > 0 && this.activeJobs.size < this.maxConcurrent) {
+            const nextJob = this.queue.shift();
+            if (nextJob && nextJob.status !== 'cancelled') {
+                this.startJob(nextJob);
+            }
+        }
+    }
+
+    getStatusSummary() {
+        const activeList = Array.from(this.activeJobs.values()).map(j => ({
+            workerId: j.workerId,
+            anime: j.animeName,
+            episode: j.episode?.title || 'Unknown Episode',
+            quality: j.quality,
+            status: j.status,
+            sizeMB: j.sizeMB || 'Calculating...',
+            startedAt: j.startedAt
+        }));
+
+        const queueList = this.queue.map((j, idx) => ({
+            position: idx + 1,
+            anime: j.animeName,
+            episode: j.episode?.title || 'Unknown Episode',
+            quality: j.quality
+        }));
+
+        return {
+            activeCount: this.activeJobs.size,
+            maxConcurrent: this.maxConcurrent,
+            activeList,
+            queueCount: this.queue.length,
+            queueList
+        };
+    }
+}
+
+const downloadWorkerQueue = new AnimeDownloadQueue(2);
+
+/**
+ * Executes a single anime download job through extraction, download, faststart remux, and WhatsApp upload.
+ */
+async function executeDownloadJob(job) {
+    const { sock, chatId, message, episode, animeName, quality, workerId } = job;
+    job.startedAt = Date.now();
+
+    try {
+        if (job.status === 'cancelled') return;
+
+        // Step 1: Notify user worker has started
+        job.status = 'extracting';
+        await sock.sendMessage(chatId, {
+            text: `⚙️ *[Worker #${workerId}] Started Download*\n📺 *Anime:* ${animeName}\n🎬 *${episode.title}* [${quality}]\n\n⏳ _Extracting high-speed stream link..._`,
+            contextInfo: channelInfo
+        }, { quoted: message });
+
+        // Step 2: Extract stream URL (75s timeout with automatic download=true fallback)
+        const streamData = await fetchStream(episode.link, 'movie', false);
+        if (job.status === 'cancelled') return;
+
+        if (!streamData || !streamData.streams || streamData.streams.length === 0) {
+            await sock.sendMessage(chatId, {
+                text: `❌ *[Worker #${workerId}]* Failed to extract stream URL.\n💡 The mirror server might be busy or spinning down. Please pick another episode or season via \`.anime episodes\`.`,
+                contextInfo: channelInfo
+            }, { quoted: message });
+            return;
+        }
+
+        const stream = streamData.streams[0];
+        const streamUrl = stream.link;
+        const fileType = (stream.type || 'mp4').toLowerCase();
+
+        if (!streamUrl) {
+            await sock.sendMessage(chatId, {
+                text: `❌ *[Worker #${workerId}]* No direct stream link found for this episode.`,
+                contextInfo: channelInfo
+            }, { quoted: message });
+            return;
+        }
+
+        // Step 3: Stream download to server disk
+        job.status = 'downloading';
+        const cleanFileBase = `${animeName}_${episode.title}_${quality}`.replace(/[^a-zA-Z0-9_-]/g, '_');
+        const rawFileName = `${job.id}_raw.${fileType}`;
+
+        await sock.sendMessage(chatId, {
+            text: `📥 *[Worker #${workerId}] Downloading to Server*\n📺 *${animeName}* — ${episode.title}\n\n⏳ _Streaming file to disk (supports up to 2GB)..._`,
+            contextInfo: channelInfo
+        }, { quoted: message });
+
+        let downloadInfo;
+        try {
+            downloadInfo = await downloadVideoToFile(streamUrl, rawFileName);
+        } catch (err) {
+            if (job.status === 'cancelled') return;
+            console.error(`[anime-worker #${workerId}] Download failed:`, err.message);
+            await sock.sendMessage(chatId, {
+                text: `⚠️ *[Worker #${workerId}] Download Failed:* ${err.message}\n\n🔗 *Direct Stream Link:*\n${streamUrl}\n\n📺 ${animeName} — ${episode.title}`,
+                contextInfo: channelInfo
+            }, { quoted: message });
+            return;
+        }
+
+        const { filePath: rawFilePath, sizeBytes, sizeMB } = downloadInfo;
+        job.cleanFilePaths.push(rawFilePath);
+        job.sizeMB = sizeMB;
+
+        if (job.status === 'cancelled') return;
+
+        // Check WhatsApp's absolute 2GB document limit
+        if (sizeBytes > MAX_WHATSAPP_DOC_SIZE) {
+            cleanupFile(rawFilePath);
+            await sock.sendMessage(chatId, {
+                text: `⚠️ *File exceeds WhatsApp's 2GB document limit* (${sizeMB}MB)\n\n🔗 *Direct Download Link:*\n${streamUrl}\n\n📺 ${animeName} — ${episode.title} [${quality}]`,
+                contextInfo: channelInfo
+            }, { quoted: message });
+            return;
+        }
+
+        // Step 4: Check if remuxing is needed (MKV or non-faststart MP4)
+        job.status = 'processing';
+        let sendFilePath = rawFilePath;
+        const finalFileName = `${cleanFileBase}.mp4`;
+
+        if (fileType === 'mkv' || !rawFilePath.endsWith('.mp4')) {
+            const mp4Output = path.join(TEMP_DIR, `${job.id}.mp4`);
+            const convertedPath = await remuxToWhatsAppMp4(rawFilePath, mp4Output);
+            if (convertedPath && fs.existsSync(convertedPath)) {
+                sendFilePath = convertedPath;
+                job.cleanFilePaths.push(convertedPath);
+                // Immediately delete raw file to preserve disk space
+                if (convertedPath !== rawFilePath) {
+                    cleanupFile(rawFilePath);
+                }
+            }
+        }
+
+        const sendStats = fs.statSync(sendFilePath);
+        const sendSizeMB = (sendStats.size / (1024 * 1024)).toFixed(2);
+        job.sizeMB = sendSizeMB;
+
+        if (job.status === 'cancelled') return;
+
+        // Step 5: Upload to WhatsApp
+        job.status = 'uploading';
+        await sock.sendMessage(chatId, {
+            text: `📤 *[Worker #${workerId}] Uploading to WhatsApp (${sendSizeMB}MB)...*\n_Sending episode to chat. Please wait a moment!_`,
+            contextInfo: channelInfo
+        }, { quoted: message });
+
+        const caption = `🎌 *${animeName}*\n📺 *${episode.title}* [${quality}]\n📊 Size: ${sendSizeMB}MB\n\n> _Processed by Worker #${workerId} • Stark Bot MD_ ⚡`;
+
+        let sentSuccessfully = false;
+        let lastUploadError = null;
+
+        // Strategy 1: Files <= 64MB - send as playable video in chat
+        if (sendStats.size <= 64 * 1024 * 1024) {
+            try {
+                await sock.sendMessage(chatId, {
+                    video: { url: sendFilePath },
+                    mimetype: 'video/mp4',
+                    fileName: finalFileName,
+                    caption,
+                    contextInfo: channelInfo
+                }, { quoted: message, mediaUploadTimeoutMs: UPLOAD_TIMEOUT_MS });
+                sentSuccessfully = true;
+            } catch (vErr) {
+                console.log(`[anime-worker #${workerId}] Video bubble send failed, trying document:`, vErr.message);
+                lastUploadError = vErr;
+            }
+        }
+
+        // Strategy 2: Document upload up to 2GB
+        // NOTE: For files > 95MB, use mimetype: 'application/octet-stream' with .mp4 filename.
+        // WhatsApp MMS server caps video/mp4 at 100MB on its upload endpoint.
+        // Setting application/octet-stream unlocks WhatsApp's full 2GB document limit,
+        // and WhatsApp clients / phones automatically associate .mp4 for video playback!
+        if (!sentSuccessfully) {
+            const isLargeDoc = sendStats.size > 95 * 1024 * 1024;
+            const docMimetype = isLargeDoc ? 'application/octet-stream' : 'video/mp4';
+
+            try {
+                await sock.sendMessage(chatId, {
+                    document: { url: sendFilePath },
+                    mimetype: docMimetype,
+                    fileName: finalFileName,
+                    caption,
+                    contextInfo: channelInfo
+                }, { quoted: message, mediaUploadTimeoutMs: UPLOAD_TIMEOUT_MS });
+                sentSuccessfully = true;
+            } catch (dErr) {
+                console.log(`[anime-worker #${workerId}] Document url upload failed:`, dErr.message);
+                lastUploadError = dErr;
+            }
+        }
+
+        // Strategy 3: Stream fallback (if Baileys url resolver was interrupted)
+        if (!sentSuccessfully) {
+            const isLargeDoc = sendStats.size > 95 * 1024 * 1024;
+            const docMimetype = isLargeDoc ? 'application/octet-stream' : 'video/mp4';
+
+            try {
+                console.log(`[anime-worker #${workerId}] Retrying document via fs.createReadStream...`);
+                await sock.sendMessage(chatId, {
+                    document: fs.createReadStream(sendFilePath),
+                    mimetype: docMimetype,
+                    fileName: finalFileName,
+                    caption,
+                    contextInfo: channelInfo
+                }, { quoted: message, mediaUploadTimeoutMs: UPLOAD_TIMEOUT_MS });
+                sentSuccessfully = true;
+            } catch (sErr) {
+                console.log(`[anime-worker #${workerId}] ReadStream upload failed:`, sErr.message);
+                lastUploadError = sErr;
+            }
+        }
+
+        // Strategy 4: If <= 90MB and still failed, buffer retry
+        if (!sentSuccessfully && sendStats.size <= 90 * 1024 * 1024) {
+            try {
+                console.log(`[anime-worker #${workerId}] Retrying upload via Buffer...`);
+                const fileBuffer = fs.readFileSync(sendFilePath);
+                await sock.sendMessage(chatId, {
+                    document: fileBuffer,
+                    mimetype: 'application/octet-stream',
+                    fileName: finalFileName,
+                    caption,
+                    contextInfo: channelInfo
+                }, { quoted: message, mediaUploadTimeoutMs: UPLOAD_TIMEOUT_MS });
+                sentSuccessfully = true;
+            } catch (bErr) {
+                console.log(`[anime-worker #${workerId}] Buffer upload failed:`, bErr.message);
+                lastUploadError = bErr;
+            }
+        }
+
+        // Strategy 5: If all uploads failed, provide direct high-speed download link
+        if (!sentSuccessfully) {
+            await sock.sendMessage(chatId, {
+                text: `⚠️ *[Worker #${workerId}] WhatsApp upload failed:* ${lastUploadError?.message || 'Media upload error'}\n\n🔗 *Direct Download Link:*\n${streamUrl}\n\n📺 ${animeName} — ${episode.title} [${quality}]\n📊 File Size: ${sendSizeMB}MB\n\n💡 _Open the link in your browser to watch or download._`,
+                contextInfo: channelInfo
+            }, { quoted: message });
+        } else {
+            job.status = 'done';
+        }
+
+    } catch (err) {
+        console.error(`[anime-worker #${workerId}] Job execution error:`, err);
+        try {
+            await sock.sendMessage(chatId, {
+                text: `❌ *[Worker #${workerId}] Error processing episode:* ${err.message || 'Unknown error'}\n💡 Please try again later.`,
+                contextInfo: channelInfo
+            }, { quoted: message });
+        } catch {}
+    } finally {
+        for (const f of job.cleanFilePaths) {
+            cleanupFile(f);
+        }
+        job.cleanFilePaths = [];
+    }
 }
 
 // ─── Main Anime Command Handler ──────────────────────────────────────────────
@@ -871,7 +1269,7 @@ async function animeDownloadCommand(sock, chatId, message, args) {
             return;
         }
 
-        // ── Download/Stream Episode (Up to 2GB WhatsApp document) ──
+        // ── Download/Stream Episode (Worker Pool & Queue up to 2GB) ──
         if (sub === 'dl' || sub === 'download' || sub === 'watch' || sub === 'stream') {
             const session = getSession(chatId);
             if (!session || !session.episodes) {
@@ -891,159 +1289,90 @@ async function animeDownloadCommand(sock, chatId, message, args) {
                 return;
             }
 
+            // Check if this chat already has a download in progress or queue
+            if (downloadWorkerQueue.hasActiveOrQueuedJob(chatId)) {
+                const existing = downloadWorkerQueue.getJobByChat(chatId);
+                const statusText = existing?.isQueued ? `in Queue (Position #${existing.position})` : `Active in Worker #${existing?.job?.workerId || 1}`;
+                await sock.sendMessage(chatId, {
+                    text: `⚠️ *You already have a download ${statusText}!*\n📺 *${existing?.job?.animeName || 'Anime'}* — ${existing?.job?.episode?.title || 'Episode'}\n\n💡 Please wait for it to finish, or cancel it using \`.anime cancel\`.`,
+                    contextInfo: channelInfo
+                }, { quoted: message });
+                return;
+            }
+
             const episode = session.episodes[num - 1];
             const animeName = cleanTitle(session.currentMeta?.title || 'Anime');
             const quality = session.selectedQuality || 'HD';
 
+            // Enqueue download task in the worker pool
+            const result = downloadWorkerQueue.enqueue({
+                sock,
+                chatId,
+                message,
+                episode,
+                animeName,
+                quality
+            });
+
+            if (result.queued) {
+                await sock.sendMessage(chatId, {
+                    text: `📥 *Added to Download Queue!*\n\n📺 *Anime:* ${animeName}\n🎬 *${episode.title}* [${quality}]\n📋 *Queue Position:* #${result.queuePosition}\n⚙️ *Active Workers:* ${downloadWorkerQueue.activeCount}/${downloadWorkerQueue.maxConcurrent}\n\n💡 _Stark Bot will automatically start downloading and send your episode when a worker becomes available!_\n_To cancel anytime, use \`.anime cancel\`._`,
+                    contextInfo: channelInfo
+                }, { quoted: message });
+            }
+            return;
+        }
+
+        // ── Check Workers & Download Queue ──
+        if (sub === 'workers' || sub === 'queue' || sub === 'status') {
+            const summary = downloadWorkerQueue.getStatusSummary();
+            let statusMsg = `╔════════════════════════╗\n   ⚙️ *DOWNLOAD WORKERS & QUEUE*\n╚════════════════════════╝\n\n`;
+            statusMsg += `🟢 *Active Workers:* ${summary.activeCount}/${summary.maxConcurrent}\n`;
+            if (summary.activeList.length === 0) {
+                statusMsg += `┃ _All workers are currently idle (Ready!)_\n`;
+            } else {
+                summary.activeList.forEach((w) => {
+                    statusMsg += `┃ 🔹 *Worker #${w.workerId}:* ${w.anime} — ${w.episode}\n┃    _Status:_ ${w.status.toUpperCase()} (${w.sizeMB})\n`;
+                });
+            }
+
+            statusMsg += `\n📋 *Waiting Queue:* ${summary.queueCount} job(s)\n`;
+            if (summary.queueList.length === 0) {
+                statusMsg += `┃ _Queue is empty_\n`;
+            } else {
+                summary.queueList.forEach((q) => {
+                    statusMsg += `┃ *#${q.position}.* ${q.anime} — ${q.episode} [${q.quality}]\n`;
+                });
+            }
+
+            statusMsg += `\n━━━━━━━━━━━━━━━━━━━━━━━━\n💡 _Use \`.anime cancel\` to cancel your download._`;
+
             await sock.sendMessage(chatId, {
-                text: `📥 *Downloading Episode*\n📺 *Anime:* ${animeName}\n🎬 *${episode.title}* [${quality}]\n\n⏳ _Fetching download link and streaming file to disk..._`,
+                text: statusMsg,
                 contextInfo: channelInfo
             }, { quoted: message });
+            return;
+        }
 
-            // Fetch stream URL
-            const streamData = await fetchStream(episode.link, 'movie', false);
-            if (!streamData || !streamData.streams || streamData.streams.length === 0) {
+        // ── Cancel Queued / Active Download ──
+        if (sub === 'cancel' || sub === 'stop' || sub === 'abort') {
+            const cancelRes = downloadWorkerQueue.cancelJob(chatId);
+            if (!cancelRes) {
                 await sock.sendMessage(chatId, {
-                    text: '❌ Failed to extract stream URL. The mirror might be busy.\n💡 Go back with `.anime episodes` and pick another source.',
+                    text: `ℹ️ You do not have any active or queued anime downloads.`,
                     contextInfo: channelInfo
                 }, { quoted: message });
                 return;
             }
 
-            const stream = streamData.streams[0];
-            const streamUrl = stream.link;
-            const fileType = (stream.type || 'mp4').toLowerCase();
-
-            if (!streamUrl) {
+            if (cancelRes.wasQueued) {
                 await sock.sendMessage(chatId, {
-                    text: '❌ No direct stream link located.',
+                    text: `✅ *Download Cancelled!*\nYour queued download for *${cancelRes.job.animeName} — ${cancelRes.job.episode.title}* was removed from the queue.`,
                     contextInfo: channelInfo
                 }, { quoted: message });
-                return;
-            }
-
-            const cleanFileBase = `${animeName}_${episode.title}_${quality}`.replace(/[^a-zA-Z0-9_-]/g, '_');
-            const fileName = `${cleanFileBase}.${fileType}`;
-
-            // 1. Download stream directly to disk (prevents RAM spikes)
-            let downloadInfo;
-            try {
-                downloadInfo = await downloadVideoToFile(streamUrl, fileName);
-            } catch (err) {
-                console.error('[anime] Stream-to-disk download failed:', err.message);
+            } else {
                 await sock.sendMessage(chatId, {
-                    text: `⚠️ *Direct download failed:* ${err.message}\n\n🔗 *Stream Link:*\n${streamUrl}\n\n📺 ${animeName} — ${episode.title}`,
-                    contextInfo: channelInfo
-                }, { quoted: message });
-                return;
-            }
-
-            const { filePath, sizeBytes } = downloadInfo;
-
-            // Check against WhatsApp's 2GB file limit
-            if (sizeBytes > MAX_WHATSAPP_DOC_SIZE) {
-                const sizeMB = (sizeBytes / (1024 * 1024)).toFixed(2);
-                cleanupFile(filePath);
-                await sock.sendMessage(chatId, {
-                    text: `⚠️ *File exceeds WhatsApp's 2GB limit* (${sizeMB}MB)\n\n🔗 *Direct Download Link:*\n${streamUrl}\n\n📺 ${animeName} — ${episode.title} [${quality}]`,
-                    contextInfo: channelInfo
-                }, { quoted: message });
-                return;
-            }
-
-            // 2. Remux/convert to WhatsApp-compatible MP4 with +faststart
-            // WhatsApp servers reject uploads that lack standard MP4 moov/faststart metadata!
-            let sendFilePath = filePath;
-            let finalFileName = fileName;
-            let finalMimetype = 'video/mp4';
-
-            if (fileType === 'mkv' || !filePath.endsWith('.mp4')) {
-                const mp4Output = path.join(TEMP_DIR, `${cleanFileBase}.mp4`);
-                const convertedPath = await remuxToWhatsAppMp4(filePath, mp4Output);
-                if (convertedPath && fs.existsSync(convertedPath)) {
-                    sendFilePath = convertedPath;
-                    finalFileName = `${cleanFileBase}.mp4`;
-                    finalMimetype = 'video/mp4';
-                }
-            }
-
-            const sendStats = fs.statSync(sendFilePath);
-            const sendSizeMB = (sendStats.size / (1024 * 1024)).toFixed(2);
-
-            // Notify user upload is starting
-            await sock.sendMessage(chatId, {
-                text: `📤 *Uploading to WhatsApp...* (${sendSizeMB}MB)\n_Please wait a moment while the file is sent!_`,
-                contextInfo: channelInfo
-            }, { quoted: message });
-
-            const caption = `🎌 *${animeName}*\n📺 *${episode.title}* [${quality}]\n📊 Size: ${sendSizeMB}MB\n\n> _Downloaded by Stark Bot MD_ 🤖`;
-
-            // 3. Multi-strategy WhatsApp delivery
-            let sentSuccessfully = false;
-            let lastUploadError = null;
-
-            // Strategy 1: Small files (<= 64MB) - send as playable video in chat
-            if (sendStats.size <= 64 * 1024 * 1024) {
-                try {
-                    await sock.sendMessage(chatId, {
-                        video: { url: sendFilePath },
-                        mimetype: 'video/mp4',
-                        fileName: finalFileName,
-                        caption,
-                        contextInfo: channelInfo
-                    }, { quoted: message, mediaUploadTimeoutMs: UPLOAD_TIMEOUT_MS });
-                    sentSuccessfully = true;
-                } catch (vErr) {
-                    console.log('[anime] Playable video send failed, falling back to document:', vErr.message);
-                    lastUploadError = vErr;
-                }
-            }
-
-            // Strategy 2: Send as document via stream (supports up to 2GB)
-            if (!sentSuccessfully) {
-                try {
-                    await sock.sendMessage(chatId, {
-                        document: { url: sendFilePath },
-                        mimetype: finalMimetype,
-                        fileName: finalFileName,
-                        caption,
-                        contextInfo: channelInfo
-                    }, { quoted: message, mediaUploadTimeoutMs: UPLOAD_TIMEOUT_MS });
-                    sentSuccessfully = true;
-                } catch (dErr) {
-                    console.log('[anime] Document stream upload failed:', dErr.message);
-                    lastUploadError = dErr;
-                }
-            }
-
-            // Strategy 3: Buffer upload retry (for regional WhatsApp servers that drop raw streams)
-            if (!sentSuccessfully && sendStats.size <= 120 * 1024 * 1024) {
-                try {
-                    console.log('[anime] Retrying upload using Buffer (fallback)...');
-                    const fileBuffer = fs.readFileSync(sendFilePath);
-                    await sock.sendMessage(chatId, {
-                        document: fileBuffer,
-                        mimetype: finalMimetype,
-                        fileName: finalFileName,
-                        caption,
-                        contextInfo: channelInfo
-                    }, { quoted: message, mediaUploadTimeoutMs: UPLOAD_TIMEOUT_MS });
-                    sentSuccessfully = true;
-                } catch (bErr) {
-                    console.log('[anime] Buffer upload failed:', bErr.message);
-                    lastUploadError = bErr;
-                }
-            }
-
-            // Clean up temporary files
-            cleanupFile(filePath);
-            if (sendFilePath !== filePath) cleanupFile(sendFilePath);
-            if (global.gc) global.gc();
-
-            // Strategy 4: If all upload attempts fail, provide the direct stream link
-            if (!sentSuccessfully) {
-                await sock.sendMessage(chatId, {
-                    text: `⚠️ *WhatsApp upload failed:* ${lastUploadError?.message || 'Media upload error'}\n\n🔗 *Direct Download Link:*\n${streamUrl}\n\n📺 ${animeName} — ${episode.title} [${quality}]\n📊 File Size: ${sendSizeMB}MB\n\n💡 _Open the link in your browser to watch or download._`,
+                    text: `🛑 *Active Download Aborted!*\nStopped download for *${cancelRes.job.animeName} — ${cancelRes.job.episode.title}*.`,
                     contextInfo: channelInfo
                 }, { quoted: message });
             }
