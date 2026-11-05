@@ -45,19 +45,18 @@
 - **Interactive Catalogs**: Browse Latest, Trending, Ongoing, TV Series, and Anime Movies.
 - **Genre Search**: Filter titles by Action, Adventure, Comedy, Fantasy, Romance, Sci-Fi, and more.
 - **Smart AniList Metadata**: Auto-resolves high-resolution official posters via AniList & Kitsu GraphQL, bypassing Cloudflare blocks.
-- **Multi-Quality Streaming & Remuxing**: Choose 360p, 480p, 720p, or 1080p. Automatically remuxes MKV streams into WhatsApp-compatible MP4 with `+faststart` metadata using FFmpeg.
-- **Large File Support (Up to 2GB)**: Sends large episodes as WhatsApp documents with extended timeouts, chunked streaming, and buffer recovery.
-- **Worker Pool Queue**: Multi-worker asynchronous queue (`.movie workers`, `.anime workers`) allowing multiple simultaneous user downloads.
-- **Search & Quick Download**: `.anime search <title>`, `.anime info <num>`, `.anime episodes <num>`, and `.anime dl <num>`.
+- **Instant Direct Download Links**: Generates instant, high-speed direct download mirrors (Google Drive CDN, FastDL, Cloudflare) with zero waiting time and no file size limits.
+- **Direct Playback & Streaming**: Direct links can be opened in VLC Media Player or MX Player for instant online watching without downloading.
+- **Search & Quick Flow**: `.anime search <title>`, `.anime info <num>`, `.anime episodes <num>`, and `.anime dl <num>`.
 
 ### 🎬 2. Powerful Movie & Web Series Zone (`.movie`)
 - **Interactive Catalogs**: Browse Latest, Netflix, 4K Ultra-HD, and Anime titles powered by MoviesDrive API.
 - **Genre Filtering**: Browse Action, Crime, Comedy, Drama, Horror, Family, Sci-Fi, Thriller, Romance, and Fight.
 - **Full TV Series & Movie Support**: Seamlessly browse full movie qualities or explore multi-season series episode lists.
 - **TMDB & Metahub Metadata**: High-resolution official posters, cast, synopsis, genres, and IMDb ratings.
-- **Multi-Mirror Streams**: Automatic fallback between Cloudflare R2 / Worker, Google Drive CDN, and Pixeldrain.
-- **Instant Faststart MP4**: Fast remuxing via FFmpeg to native MP4 with moov atom for immediate in-app video playback.
-- **Up to 2GB Document Delivery**: High-speed multi-worker downloads delivered with native MP4 badges in WhatsApp.
+- **Multi-Server Direct Downloads**: Instant direct download servers (Cloudflare R2 / Workers, Google Drive CDN, Pixeldrain) for 1-click max-speed downloading (Chrome, 1DM, ADM).
+- **VLC / MX Player Streaming**: Stream any movie or episode directly over network without waiting for huge downloads.
+- **No File Size Restrictions**: Works seamlessly for any movie size (from 480p 400MB up to 4K UHD 15GB+).
 - **Simple Flow**: `.movie search <name>`, `.movie info <num>`, `.movie episodes <num>` (for series), and `.movie dl <num>`.
 
 ### 👮‍♂️ 3. Group Management & Security
