@@ -5,7 +5,7 @@ const settings = {
   author: 'pujeshreddy',
   botName: "Stark Bot MD",
   botOwner: 'pujeshreddy', // Your name
-  ownerNumber: '919603298365', //Set your number here without + symbol, just add country code & number without any space
+  ownerNumber: '918639713959', //Set your number here without + symbol, just add country code & number without any space
   giphyApiKey: 'qnl7ssQChTdPjsKta2Ax2LMaGXz303tq',
   commandMode: "public",
   maxStoreMessages: 20, 
